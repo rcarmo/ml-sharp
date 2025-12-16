@@ -37,9 +37,18 @@ HTML_INDEX = """<!doctype html>
             <option value=\"1.00\">Full (100%)</option>
           </select>
         </p>
+        <p>
+          <label>Wobble:</label>
+          <select name=\"wobble_scale\">
+            <option value=\"0.00\">Off</option>
+            <option value=\"0.25\" selected>Subtle</option>
+            <option value=\"0.50\">Medium</option>
+            <option value=\"1.00\">More</option>
+          </select>
+        </p>
         <button type=\"submit\">Generate MP4</button>
       </form>
-      <p>Trajectory: centered horizontal swipe; “Motion” controls the travel width.</p>
+      <p>Trajectory: centered horizontal swipe with a subtle vertical cosine wobble; “Motion” controls the travel width.</p>
     </main>
   </body>
 </html>
@@ -74,6 +83,7 @@ def create_app():
         duration_s: float = Form(4.0),
         fps: int = Form(30),
         motion_scale: float = Form(0.20),
+      wobble_scale: float = Form(0.25),
     ):
         image_bytes = await image.read()
         video_bytes = generate_sharp_swipe_mp4(
@@ -81,6 +91,7 @@ def create_app():
             duration_s=duration_s,
             fps=fps,
             motion_scale=motion_scale,
+        wobble_scale=wobble_scale,
         )
 
         headers = {"Content-Disposition": "attachment; filename=pan.mp4"}

@@ -240,6 +240,7 @@ def _render_depth_parallax_swipe_mp4(
     duration_s: float,
     fps: int,
     max_disparity: float,
+    wobble_scale: float,
 ) -> bytes:
     """MPS/CPU fallback: depth-based parallax warp.
 
@@ -319,12 +320,17 @@ def _render_depth_parallax_swipe_mp4(
     # Pixel shift amplitude.
     max_shift_px = float(max_disparity) * float(width)
 
+    # Add a subtle vertical oscillation (cosine wave) over the duration.
+    # The amplitude is intentionally small; the UI exposes an additional scale.
+    wobble_scale = float(max(0.0, wobble_scale))
+    y_amp_px = wobble_scale * max(0.75, 0.04 * max_shift_px)
+
     # Avoid tearing at both ends by rendering into a replicate-padded canvas and
     # cropping back. This avoids relying on grid_sample padding_mode="border",
     # which isn't consistently supported on MPS.
     max_abs_t = 0.6
     pad_x = int(np.ceil(max_abs_t * max_shift_px)) + 2
-    pad_y = 2
+    pad_y = int(np.ceil(y_amp_px)) + 2
     height_p = height + 2 * pad_y
     width_p = width + 2 * pad_x
     plane_a_p = F.pad(plane_a, (pad_x, pad_x, pad_y, pad_y), mode="replicate")
@@ -352,7 +358,14 @@ def _render_depth_parallax_swipe_mp4(
             macro_block_size=1,
         )
         try:
-            for t in ts:
+            for frame_idx, t in enumerate(ts.tolist()):
+                t = torch.tensor(t, device=device, dtype=torch.float32)
+                progress = 0.0 if frame_count <= 1 else float(frame_idx) / float(frame_count - 1)
+                # Use a half cosine so horizontal ends map to -1 and +1.
+                # progress=0 -> -1, progress=1 -> +1
+                y_shift_px = float(y_amp_px) * float(-np.cos(np.pi * progress))
+                y_shift = (2.0 * y_shift_px) / max(1.0, float(height_p - 1))
+
                 out_rgb = torch.zeros((1, 3, height_p, width_p), device=device, dtype=torch.float32)
                 out_a = torch.zeros((1, 1, height_p, width_p), device=device, dtype=torch.float32)
 
@@ -362,6 +375,7 @@ def _render_depth_parallax_swipe_mp4(
                     x_shift = (2.0 * shift_px) / max(1.0, float(width_p - 1))
                     grid = base_grid.clone()
                     grid[..., 0] = grid[..., 0] + x_shift
+                    grid[..., 1] = grid[..., 1] + y_shift
 
                     # Soft alpha only to unpremultiply (avoid dark fringes).
                     a_soft = F.grid_sample(
@@ -440,6 +454,7 @@ def generate_sharp_swipe_mp4(
     fps: int = 30,
     max_disparity: float = 0.08,
     motion_scale: float = 0.20,
+    wobble_scale: float = 0.25,
 ) -> bytes:
     """Generate a model-based swipe (horizontal pan) MP4.
 
@@ -455,6 +470,9 @@ def generate_sharp_swipe_mp4(
     if motion_scale <= 0:
         raise ValueError("motion_scale must be > 0")
     max_disparity = float(max_disparity) * float(motion_scale)
+
+    if wobble_scale < 0:
+        raise ValueError("wobble_scale must be >= 0")
 
     image_rgb, f_px = _load_upload_rgb_and_fpx(image_bytes)
     image_rgb = _ensure_even_hw_uint8_rgb(image_rgb)
@@ -489,9 +507,25 @@ def generate_sharp_swipe_mp4(
         camera_model = camera.create_camera_model(
             gaussians, intrinsics, resolution_px=metadata.resolution_px
         )
-        trajectory = camera.create_eye_trajectory(
-            gaussians, params, resolution_px=metadata.resolution_px, f_px=f_px
+        # Centered horizontal swipe with a slight vertical cosine oscillation.
+        max_offset_xyz_m = camera.compute_max_offset(
+            gaussians,
+            params,
+            resolution_px=metadata.resolution_px,
+            f_px=f_px,
         )
+        offset_x_m, offset_y_m, _ = max_offset_xyz_m
+        y_amp_m = float(wobble_scale) * 0.04 * float(offset_y_m)
+        xs = np.linspace(-float(offset_x_m), float(offset_x_m), frame_count)
+        ps = np.linspace(0.0, 1.0, frame_count)
+        trajectory = [
+            torch.tensor(
+                # Half cosine so ends map to -1 and +1.
+                [float(x), float(y_amp_m * (-np.cos(np.pi * p))), float(params.distance_m)],
+                dtype=torch.float32,
+            )
+            for x, p in zip(xs, ps, strict=True)
+        ]
 
         renderer = GSplatRenderer(color_space=metadata.color_space)
 
@@ -538,4 +572,5 @@ def generate_sharp_swipe_mp4(
         duration_s=duration_s,
         fps=fps,
         max_disparity=max_disparity,
+        wobble_scale=wobble_scale,
     )
